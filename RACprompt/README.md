@@ -21,9 +21,9 @@ Repository này triển khai đầy đủ RAC-OPD cho Qwen3. Student luôn sinh 
 
 Các giá trị này nằm trong `configs/rac_opd.yaml`. Dataset loader tự nhận diện Hugging Face `save_to_disk`, JSON, JSONL hoặc Parquet, in schema đã phát hiện và dùng toàn bộ split được chọn.
 
-## 2. Cài đặt mới trên B200
+## 2. Cài đặt mới trên B200 không có Internet
 
-Chạy từ một virtual environment mới:
+B200 này không truy cập được `download.pytorch.org`, PyPI hoặc GitHub. Chỉ dùng ba Nexus mirror nội bộ xuất hiện trong cấu hình của máy. Khối lệnh dưới đây chủ động bỏ qua mọi pip config kế thừa và không chứa URL Internet nào:
 
 ```bash
 cd /workspace/storage-shared/nlp/minhpn19/RACprompt
@@ -31,12 +31,72 @@ cd /workspace/storage-shared/nlp/minhpn19/RACprompt
 python3 -m venv .venv
 source .venv/bin/activate
 
+# Ép pip chỉ dùng Nexus nội bộ. /dev/null vô hiệu hóa pip.conf cũ có URL ngoài.
+export PIP_CONFIG_FILE=/dev/null
+export PIP_INDEX_URL=http://10.30.154.118:8888/repository/pypi.org/simple/
+export PIP_EXTRA_INDEX_URL="http://10.30.154.118:8888/repository/python/simple/ http://10.30.154.118:8888/repository/pypi-official/simple/"
+export PIP_TRUSTED_HOST=10.30.154.118
+
 python -m pip install --upgrade pip setuptools wheel
-pip install vllm==0.23.0 --extra-index-url https://download.pytorch.org/whl/cu129
-pip install -r requirements.txt
+python -m pip install vllm==0.23.0
+python -m pip install -r requirements.txt
 ```
 
-Dòng cài vLLM riêng là có chủ ý. B200/GB200 cần CUDA 12.8 trở lên; wheel vLLM CUDA 12.9 mang theo bản PyTorch tương thích. Không nên cài trước một wheel PyTorch có CUDA ABI khác. Nếu image B200 dùng ABI khác, chọn wheel tương ứng theo [hướng dẫn GPU chính thức của vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/).
+Không thêm lại `--extra-index-url https://download.pytorch.org/...`: pip sẽ luôn thử kết nối URL đó và bị retry vì máy không có route ra Internet.
+
+Trước khi cài, có thể kiểm tra Nexus đã mirror đúng version hay chưa. Lệnh này cũng chỉ truy cập mạng nội bộ:
+
+```bash
+python -m pip index versions vllm
+python -m pip index versions torch
+```
+
+Nếu output có `vllm 0.23.0` và `torch 2.11.0`, tiếp tục dùng khối cài đặt phía trên. Có thể kiểm tra toàn bộ index đang có hiệu lực bằng:
+
+```bash
+python -m pip config debug
+```
+
+Output chỉ được chứa host nội bộ `10.30.154.118`; không được có URL bắt đầu bằng `https://download.pytorch.org`, `https://pypi.org` hoặc URL GitHub.
+
+### Nếu Nexus chưa có vLLM/PyTorch cần thiết
+
+Máy hoàn toàn offline chỉ cài được package đã có trong Nexus hoặc wheel được chép vào shared storage. Trên một máy Linux x86_64 có Internet, dùng cùng Python major/minor với B200 để tạo wheelhouse:
+
+```bash
+cd /path/to/RACprompt
+python3 -m venv wheel-download-env
+source wheel-download-env/bin/activate
+python -m pip install --upgrade pip
+
+mkdir -p racprompt-wheelhouse
+python -m pip download \
+  --dest racprompt-wheelhouse \
+  --extra-index-url https://download.pytorch.org/whl/cu129 \
+  vllm==0.23.0 \
+  -r requirements.txt
+
+tar -czf racprompt-wheelhouse-cu129.tar.gz racprompt-wheelhouse
+```
+
+Chép `racprompt-wheelhouse-cu129.tar.gz` vào shared storage, rồi trên B200:
+
+```bash
+cd /workspace/storage-shared/nlp/minhpn19/RACprompt
+source .venv/bin/activate
+
+tar -xzf /path/on/shared-storage/racprompt-wheelhouse-cu129.tar.gz
+python -m pip install \
+  --no-index \
+  --find-links ./racprompt-wheelhouse \
+  vllm==0.23.0
+python -m pip install \
+  --no-index \
+  --find-links ./racprompt-wheelhouse \
+  -r requirements.txt
+```
+
+`--no-index` bảo đảm pip không thử truy cập bất kỳ mạng nào. Wheelhouse phải được tạo cho cùng kiến trúc, phiên bản Python và CUDA stack của B200.
 
 Kiểm tra môi trường:
 
@@ -376,6 +436,22 @@ python train.py --dry_run \
 Dry run dùng tối đa tám prompt, một optimizer step, tối đa 32 response tokens và tắt full evaluation. Nó không thay đổi default của run thật.
 
 ## 11. Ghi chú backend và xử lý lỗi
+
+### Pip báo `Network is unreachable` với `download.pytorch.org`
+
+Shell hiện tại vẫn còn external index từ lệnh cũ hoặc từ `pip.conf`. Thiết lập lại ba biến internal-only rồi cài lại:
+
+```bash
+export PIP_CONFIG_FILE=/dev/null
+export PIP_INDEX_URL=http://10.30.154.118:8888/repository/pypi.org/simple/
+export PIP_EXTRA_INDEX_URL="http://10.30.154.118:8888/repository/python/simple/ http://10.30.154.118:8888/repository/pypi-official/simple/"
+export PIP_TRUSTED_HOST=10.30.154.118
+
+python -m pip install vllm==0.23.0
+python -m pip install -r requirements.txt
+```
+
+Không dùng `--extra-index-url https://download.pytorch.org/whl/cu129` trên B200 offline.
 
 ### Thấy cảnh báo fallback từ vLLM training rollout
 

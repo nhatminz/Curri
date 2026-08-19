@@ -50,7 +50,8 @@ rollout:
   allow_vllm_training_backend: true
 
 training:
-  run_name: rac_opd_qwen3
+  # "auto" becomes rac_opd_qwen3_YYYYMMDD_HHMMSS at launch time.
+  run_name: auto
   global_batch_size: 32
   max_steps: 0
   extra_steps: 100

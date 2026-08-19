@@ -24,13 +24,22 @@ from .checkpoint import (
     resolve_resume_path,
     save_checkpoint,
 )
-from .config import RACConfig, save_config
+from .config import (
+    RACConfig,
+    is_automatic_run_name,
+    latest_run_file,
+    make_timestamped_run_name,
+    read_latest_run_name,
+    run_name_from_checkpoint,
+    save_config,
+)
 from .critical_states import select_critical_states
 from .curriculum import CurriculumState, PromptScore
 from .data import load_records, render_prompt, tokenize_prompt
 from .distributed import (
     DistributedContext,
     barrier,
+    broadcast_object,
     broadcast_indices,
     ddp_local_loss_scale,
     gather_objects,
@@ -69,6 +78,7 @@ class RACOPDTrainer:
         self.context = context
         if context.world_size > config.training.global_batch_size:
             raise ValueError("world_size cannot exceed the exact global batch size")
+        self._resolve_run_name()
         self.output_dir = Path(config.paths.output_root) / config.training.run_name
         self.checkpoint_root = self.output_dir / "checkpoints"
         self.resume_path = resolve_resume_path(
@@ -175,6 +185,17 @@ class RACOPDTrainer:
         self.config.training.max_steps = self.max_steps
         if context.is_main:
             save_config(config, self.output_dir / "config_resolved.yaml")
+            marker = latest_run_file(config.paths.output_root)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            temporary_marker = marker.with_name(
+                f".latest_run.{config.training.run_name}.tmp"
+            )
+            temporary_marker.write_text(
+                config.training.run_name + "\n", encoding="utf-8"
+            )
+            temporary_marker.replace(marker)
+            LOGGER.info("Run name: %s", config.training.run_name)
+            LOGGER.info("Run directory: %s", self.output_dir)
         self.tokenized_prompts = self._prepare_prompts()
         self.data_metadata = {
             "train_path": config.paths.train_data,
@@ -182,6 +203,24 @@ class RACOPDTrainer:
             "prompt_ids": self.prompt_ids,
             "schema": asdict(self.schema),
         }
+
+    def _resolve_run_name(self) -> None:
+        configured = self.config.training.run_name
+        if not is_automatic_run_name(configured):
+            return
+        resolved: str | None = None
+        if self.context.is_main:
+            resume = self.config.checkpoint.resume
+            if resume and resume.lower() == "latest":
+                resolved = read_latest_run_name(self.config.paths.output_root)
+            elif resume:
+                resolved = run_name_from_checkpoint(resume)
+            else:
+                resolved = make_timestamped_run_name()
+        resolved = broadcast_object(resolved, self.context)
+        if not isinstance(resolved, str) or not resolved:
+            raise RuntimeError("Failed to resolve a shared run name")
+        self.config.training.run_name = resolved
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         kwargs: dict[str, Any] = {

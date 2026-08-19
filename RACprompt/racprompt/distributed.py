@@ -92,6 +92,14 @@ def gather_objects(local: Any, context: DistributedContext) -> list[Any] | None:
     return gathered
 
 
+def broadcast_object(value: Any, context: DistributedContext) -> Any:
+    if context.world_size == 1:
+        return value
+    payload = [value if context.is_main else None]
+    dist.broadcast_object_list(payload, src=0, device=context.device)
+    return payload[0]
+
+
 def barrier(context: DistributedContext) -> None:
     if context.world_size > 1:
         dist.barrier()

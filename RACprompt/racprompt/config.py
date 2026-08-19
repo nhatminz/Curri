@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, get_type_hints
 
@@ -74,7 +76,7 @@ class RolloutConfig:
 
 @dataclass
 class TrainingConfig:
-    run_name: str = "rac_opd_qwen3"
+    run_name: str = "auto"
     global_batch_size: int = 32
     max_steps: int = 0
     extra_steps: int = 100
@@ -151,6 +153,12 @@ class RACConfig:
             raise ValueError("curriculum temperature must be positive")
         if self.training.opd_top_k <= 0 or self.critical.stats_top_k <= 0:
             raise ValueError("top-k values must be positive")
+        if not is_automatic_run_name(self.training.run_name) and not re.fullmatch(
+            r"[A-Za-z0-9._-]+", self.training.run_name
+        ):
+            raise ValueError(
+                "training.run_name may contain only letters, digits, dot, underscore, and hyphen"
+            )
 
 
 def _construct_dataclass(cls: type, values: Mapping[str, Any]) -> Any:
@@ -213,3 +221,37 @@ def save_config(config: RACConfig, path: str | Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(config_to_dict(config), handle, sort_keys=False)
+
+
+def is_automatic_run_name(value: str | None) -> bool:
+    return not value or value.strip().lower() in {"auto", "timestamp"}
+
+
+def make_timestamped_run_name(prefix: str = "rac_opd_qwen3") -> str:
+    return f"{prefix}_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}"
+
+
+def latest_run_file(output_root: str | Path) -> Path:
+    return Path(output_root) / "latest_run.txt"
+
+
+def read_latest_run_name(output_root: str | Path) -> str:
+    marker = latest_run_file(output_root)
+    if not marker.exists():
+        raise FileNotFoundError(
+            f"No latest-run marker at {marker}. Set RUN_NAME explicitly or start a run first."
+        )
+    value = marker.read_text(encoding="utf-8").strip()
+    if not value:
+        raise ValueError(f"Latest-run marker is empty: {marker}")
+    return value
+
+
+def run_name_from_checkpoint(checkpoint: str | Path) -> str:
+    path = Path(checkpoint).expanduser().resolve()
+    if path.parent.name != "checkpoints":
+        raise ValueError(
+            "Cannot infer run name: checkpoint must look like "
+            "<output_root>/<run_name>/checkpoints/step_NNNNNN"
+        )
+    return path.parent.parent.name

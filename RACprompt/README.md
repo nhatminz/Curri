@@ -1,28 +1,29 @@
 # RAC-OPD: Recoverability-Aware Curriculum for On-Policy Distillation
 
-This repository implements the dynamic RAC-OPD curriculum for Qwen3. The behavior rollout is always sampled from the current student. Sparse counterfactual teacher-preferred branches are one-token, `no_grad` diagnostics that update only the *future* prompt distribution; they never modify rollout tokens, become training targets, or weight the current loss.
+Repository này triển khai đầy đủ RAC-OPD cho Qwen3. Student luôn sinh rollout từ đúng trọng số hiện tại. Các nhánh teacher-preferred chỉ là phép đo phản thực một bước trong `no_grad`; chúng không sửa rollout, không trở thành target huấn luyện và không reweight loss của batch hiện tại.
 
-## Method and implementation
+## 1. Mặc định thí nghiệm
 
-- Rank 0 owns the curriculum RNG, samples exactly 32 prompt indices with replacement, broadcasts them, and splits them unevenly when necessary.
-- Prompt memory starts at 0.5, optionally ages toward 0.5, and mixes softmax priority with 10% uniform exploration.
-- Each prompt gets one current-policy rollout. The default is HF/PyTorch generation with BF16 and current in-memory weights.
-- `Dplus` is exact full-vocabulary positive correction mass; `C` is teacher mass on student top-32 support.
-- The default 24 critical states combine 12 segment maxima, 8 global `Dplus` peaks, 4 compatibility changes, NMS, and gap-relaxed fill.
-- Critical-state selection never uses a TA-OPD `D*C` score.
-- Up to four strictly positive teacher-preferred tokens inside student top-32 support create one-step diagnostic branches.
-- Branch scoring reuses the critical-prefix KV cache where the installed Transformers cache API supports it; a batched fallback is explicit and logged.
-- `A`, weighted next-state compatibility `F`, and bridgeability `B=A*F` produce bottleneck-sensitive geometric recoverability `R`.
-- Prompt priority is `T=G*R`; EMA updates affect only later sampling, so mastered prompts naturally lose priority.
-- Training re-forwards only the original rollout and minimizes token-mean student-top-16 reverse KL, with no curriculum loss weights or token mask.
-- DDP loss scaling remains the exact global mean for uneven rank splits and never changes LR or global batch with GPU count.
-- Checkpoints include student/optimizer/scheduler, curriculum arrays, per-rank RNG states, schema metadata, and resolved configuration.
-- Full MATH-500, AIME 2024, and AIME 2025 evaluation uses vLLM at step 0, each interval, and final step.
-- Logs, raw evaluation generations, prompt/critical-state CSVs, TensorBoard data, PNGs, and PDFs are produced automatically.
+| Thành phần | Giá trị mặc định |
+|---|---|
+| Student | `/workspace/storage-shared/models/Qwen3-1.7B` |
+| Frozen teacher | `/workspace/storage-shared/models/Qwen3-8B` |
+| Training pool | `/workspace/storage-shared/nlp/minhpn19/data/DAPO-Math-17k-Processed` |
+| MATH-500 | `/workspace/storage-shared/nlp/minhpn19/data/eval/math500` |
+| AIME 2024 | `/workspace/storage-shared/nlp/minhpn19/data/eval/aime24` |
+| AIME 2025 | `/workspace/storage-shared/nlp/minhpn19/data/eval/aime25` |
+| Output root | `/workspace/storage-shared/nlp/minhpn19/RACprompt/outputs` |
+| Global batch | 32, không phụ thuộc số GPU |
+| Critical states | 24 |
+| Counterfactual branches/state | 4 |
+| OPD top-K | 16 |
+| Precision | BF16, không quantization |
 
-## Fresh B200 environment
+Các giá trị này nằm trong `configs/rac_opd.yaml`. Dataset loader tự nhận diện Hugging Face `save_to_disk`, JSON, JSONL hoặc Parquet, in schema đã phát hiện và dùng toàn bộ split được chọn.
 
-Run on the B200 host from a fresh environment:
+## 2. Cài đặt mới trên B200
+
+Chạy từ một virtual environment mới:
 
 ```bash
 cd /workspace/storage-shared/nlp/minhpn19/RACprompt
@@ -35,39 +36,95 @@ pip install vllm==0.23.0 --extra-index-url https://download.pytorch.org/whl/cu12
 pip install -r requirements.txt
 ```
 
-The dedicated vLLM installation line is intentional. B200/GB200 needs CUDA 12.8 or newer, and the vLLM 0.23.0 CUDA 12.9 wheel brings its compatible PyTorch 2.11 build. Do not first install an unrelated PyTorch wheel into this venv. If the B200 image is standardized on another CUDA ABI, use the matching wheel from the [official vLLM GPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) and keep vLLM/PyTorch paired.
+Dòng cài vLLM riêng là có chủ ý. B200/GB200 cần CUDA 12.8 trở lên; wheel vLLM CUDA 12.9 mang theo bản PyTorch tương thích. Không nên cài trước một wheel PyTorch có CUDA ABI khác. Nếu image B200 dùng ABI khác, chọn wheel tương ứng theo [hướng dẫn GPU chính thức của vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/).
 
-Verify the environment and run unit tests:
+Kiểm tra môi trường:
 
 ```bash
 python - <<'PY'
-import torch, transformers, vllm
-print("torch", torch.__version__, "cuda", torch.version.cuda)
-print("bf16", torch.cuda.is_bf16_supported(), "gpus", torch.cuda.device_count())
-print("transformers", transformers.__version__, "vllm", vllm.__version__)
+import torch
+import transformers
+import vllm
+
+print("torch:", torch.__version__)
+print("torch CUDA:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+print("BF16 supported:", torch.cuda.is_bf16_supported())
+print("visible GPUs:", torch.cuda.device_count())
+print("transformers:", transformers.__version__)
+print("vllm:", vllm.__version__)
 PY
+
 python -m pytest -q
 ```
 
-## Training commands
+Kết quả mong đợi là CUDA/BF16 đều khả dụng và toàn bộ unit tests pass.
 
-The launcher derives process count only from currently visible GPUs and keeps global batch 32.
+## 3. Run name tự động
 
-```bash
-# 1 GPU
-CUDA_VISIBLE_DEVICES=0 bash scripts/train.sh
+Khi không truyền `RUN_NAME`, `scripts/train.sh` tạo tên tại thời điểm bấm chạy:
 
-# 2 GPUs
-CUDA_VISIBLE_DEVICES=0,1 bash scripts/train.sh
-
-# 3 GPUs (split 11/11/10, still exactly 32 globally)
-CUDA_VISIBLE_DEVICES=0,1,2 bash scripts/train.sh
-
-# 4 GPUs
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/train.sh
+```text
+rac_opd_qwen3_YYYYMMDD_HHMMSS
 ```
 
-Common overrides are environment variables; no Python edits are needed:
+Ví dụ:
+
+```text
+rac_opd_qwen3_20260819_143527
+```
+
+Tên được tạo đúng một lần trước `torchrun`, vì vậy mọi DDP rank dùng cùng một output directory. Launcher luôn in:
+
+```text
+RAC-OPD run name: rac_opd_qwen3_20260819_143527
+RAC-OPD output:   /workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/rac_opd_qwen3_20260819_143527
+```
+
+Sau khi trainer khởi tạo thành công, file sau được cập nhật:
+
+```text
+/workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/latest_run.txt
+```
+
+Xem run gần nhất bằng:
+
+```bash
+cat /workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/latest_run.txt
+```
+
+Nếu muốn một tên cố định thay vì timestamp:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+RUN_NAME=rac_opd_ablation_no_aging \
+bash scripts/train.sh
+```
+
+Khi chạy trực tiếp `train.py`, `training.run_name=auto` trong YAML cũng được rank 0 chuyển thành tên timestamp rồi broadcast cho các rank.
+
+## 4. Chạy training
+
+Launcher chỉ nhìn `CUDA_VISIBLE_DEVICES` để xác định số process. Global batch vẫn đúng 32 và learning rate không tự scale theo số GPU.
+
+```bash
+# 1 GPU: local batch 32
+CUDA_VISIBLE_DEVICES=0 bash scripts/train.sh
+
+# 2 GPU: 16/16
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/train.sh
+
+# 3 GPU: 11/11/10, tổng vẫn là 32
+CUDA_VISIBLE_DEVICES=0,1,2 bash scripts/train.sh
+
+# 4 GPU: 8/8/8/8
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/train.sh
+
+# 5 GPU: 7/7/6/6/6
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 bash scripts/train.sh
+```
+
+Một lệnh thí nghiệm đầy đủ:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2 \
@@ -81,61 +138,232 @@ MAX_PROMPT_TOKENS=1024 \
 MAX_NEW_TOKENS=2048 \
 CRITICAL_STATES=24 \
 ROLLOUT_BACKEND=auto \
-RUN_NAME=rac_opd_qwen3_exp1 \
 bash scripts/train.sh
 ```
 
-`MAX_STEPS=0` resolves to `ceil(N/GLOBAL_BATCH_SIZE)+EXTRA_STEPS`. `CRITICAL_STATES` accepts 1–50; 24 is the research default. `M_BRANCHES` is intentionally fixed at 4 by config validation. Additional settings can be appended as normal CLI overrides:
+Không có `RUN_NAME` trong lệnh trên nên tên sẽ được sinh tự động.
+
+### Các biến thường dùng
+
+| Biến shell | Mặc định | Ý nghĩa |
+|---|---:|---|
+| `LR` | `1e-6` | AdamW learning rate; không scale theo GPU |
+| `GLOBAL_BATCH_SIZE` | `32` | Tổng số prompt mỗi optimizer step |
+| `MAX_STEPS` | `0` | `<=0` dùng công thức tự động |
+| `EXTRA_STEPS` | `100` | Số step cộng thêm khi `MAX_STEPS<=0` |
+| `MAX_PROMPT_TOKENS` | `1024` | Giới hạn token prompt training |
+| `MAX_NEW_TOKENS` | `2048` | Giới hạn rollout response |
+| `EVAL_EVERY` | `50` | Khoảng cách evaluation |
+| `SAVE_EVERY` | `50` | Khoảng cách checkpoint |
+| `CRITICAL_STATES` | `24` | Số state mục tiêu, hợp lệ từ 1 đến 50 |
+| `M_BRANCHES` | `4` | Main method cố định bằng 4 |
+| `ROLLOUT_BACKEND` | `auto` | Chọn backend rollout an toàn |
+| `RUN_NAME` | timestamp tự động | Tên thủ công nếu cần |
+| `OUTPUT_ROOT` | B200 output path | Root chứa tất cả run |
+| `CONFIG` | `configs/rac_opd.yaml` | File cấu hình gốc |
+| `RESUME` | rỗng | `latest` hoặc checkpoint cụ thể |
+
+Khi `MAX_STEPS=0`, trainer dùng:
+
+```text
+ceil(len(full_training_dataset) / GLOBAL_BATCH_SIZE) + EXTRA_STEPS
+```
+
+Có thể override mọi trường YAML bằng `--set` đặt sau lệnh script:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash scripts/train.sh \
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/train.sh \
   --set curriculum.enable_staleness_decay=false \
-  --set rollout.temperature=1.0 \
-  --set critical.stats_top_k=32
+  --set curriculum.temperature=0.30 \
+  --set critical.stats_top_k=48 \
+  --set rollout.temperature=0.9 \
+  --set training.opd_top_k=24
 ```
 
-The training vLLM fast path is guarded because public colocated weight-transfer APIs are version-specific. In this delivered version, `ROLLOUT_BACKEND=auto` explicitly logs why it selects the exact current-weight Transformers backend. It never reloads vLLM from disk per step and never silently permits stale rollouts. `ROLLOUT_BACKEND=vllm` fails until a version-pinned, validated in-memory weight-sync adapter is supplied.
+Các `--set` bổ sung nằm cuối command nên có quyền ưu tiên cao hơn biến mặc định của launcher.
 
-## Resume
+## 5. Resume chính xác
 
-Resume uses the next optimizer step and does not repeat step-0 evaluation. Exact RNG continuation requires the same GPU/world size as the saved run.
+Checkpoint lưu student, optimizer, scheduler, curriculum memory, usage counts, step và RNG của từng rank. Resume tiếp tục từ step kế tiếp và không chạy lại evaluation step 0.
+
+Để resume run gần nhất mà không cần nhớ timestamp:
 
 ```bash
-# Latest checkpoint in outputs/<RUN_NAME>/checkpoints
-CUDA_VISIBLE_DEVICES=0,1,2 RUN_NAME=rac_opd_qwen3 RESUME=latest bash scripts/train.sh
-
-# Explicit checkpoint
-CUDA_VISIBLE_DEVICES=0,1,2 RUN_NAME=rac_opd_qwen3 \
-RESUME=/workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/rac_opd_qwen3/checkpoints/step_000100 \
+CUDA_VISIBLE_DEVICES=0,1,2 \
+RESUME=latest \
 bash scripts/train.sh
 ```
 
-## Standalone full evaluation
+Launcher đọc run name từ `outputs/latest_run.txt`, sau đó tìm checkpoint mới nhất trong run đó.
 
-All three complete datasets are evaluated; `EVAL_SAMPLES=4` is the default. The script requests vLLM data-parallel replicas (`TP=1`) across all visible GPUs when supported by the installed offline API.
+Resume checkpoint cụ thể; nếu không truyền `RUN_NAME`, launcher suy ra tên run từ path:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 RUN_NAME=rac_opd_qwen3 CHECKPOINT=latest bash scripts/eval.sh
+CUDA_VISIBLE_DEVICES=0,1,2 \
+RESUME=/workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/rac_opd_qwen3_20260819_143527/checkpoints/step_000100 \
+bash scripts/train.sh
+```
 
-# Evaluate an explicit model directory as step 0
+Resume latest của một run được chỉ định rõ:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2 \
+RUN_NAME=rac_opd_qwen3_20260819_143527 \
+RESUME=latest \
+bash scripts/train.sh
+```
+
+Để khôi phục chính xác RNG/DDP, phải dùng cùng số GPU và cùng thứ tự `CUDA_VISIBLE_DEVICES` như lúc tạo checkpoint. Có thể đặt `MAX_STEPS` lớn hơn để kéo dài run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2 \
+RESUME=latest \
+MAX_STEPS=900 \
+bash scripts/train.sh
+```
+
+## 6. Evaluation đầy đủ
+
+Training tự chạy full MATH-500, AIME 2024 và AIME 2025 tại:
+
+1. step 0 trước optimizer update;
+2. mỗi `EVAL_EVERY` step;
+3. final step, kể cả khi không chia hết cho interval.
+
+Mỗi problem mặc định sinh bốn samples bằng vLLM BF16. Evaluation chạy trong process riêng để giải phóng hoàn toàn vLLM engine trước khi training tiếp tục.
+
+Đánh giá checkpoint mới nhất của run mới nhất:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/eval.sh
+```
+
+Đánh giá run cụ thể:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+RUN_NAME=rac_opd_qwen3_20260819_143527 \
+CHECKPOINT=latest \
+bash scripts/eval.sh
+```
+
+Thay số sample hoặc độ dài response evaluation:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+EVAL_SAMPLES=8 \
+EVAL_MAX_NEW_TOKENS=3072 \
+bash scripts/eval.sh
+```
+
+Đánh giá trực tiếp một model không thuộc checkpoint:
+
+```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate.py \
   --model /workspace/storage-shared/models/Qwen3-1.7B \
-  --step 0
+  --step 0 \
+  --output_dir /workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/base_qwen3_eval
 ```
 
-## Regenerate plots
+`scripts/eval.sh` ưu tiên data parallel với `TP=1` trên số GPU nhìn thấy nếu installed vLLM hỗ trợ offline `data_parallel_size`.
+
+## 7. Theo dõi training
+
+Lấy đường dẫn run gần nhất:
 
 ```bash
-RUN_NAME=rac_opd_qwen3 bash scripts/plot.sh
-
-# Or point directly at a run directory
-python analyze.py \
-  --output_dir /workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/rac_opd_qwen3
+OUTPUT_ROOT=/workspace/storage-shared/nlp/minhpn19/RACprompt/outputs
+LATEST_RUN="$(cat "${OUTPUT_ROOT}/latest_run.txt")"
+RUN_DIR="${OUTPUT_ROOT}/${LATEST_RUN}"
+echo "${RUN_DIR}"
 ```
 
-## Local smoke mode
+Theo dõi JSONL hoặc CSV:
 
-Real defaults always use the B200 paths. For a tiny local model/dataset, override paths explicitly; dry run then caps the pool at eight records, uses one step and at most 32 response tokens, and disables full evaluation:
+```bash
+tail -f "${RUN_DIR}/logs/train.jsonl"
+```
+
+```bash
+column -s, -t < "${RUN_DIR}/logs/train_metrics.csv" | less -S
+```
+
+TensorBoard:
+
+```bash
+tensorboard \
+  --logdir "${RUN_DIR}/logs/tensorboard" \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+Mỗi training step log loss, gradient norm, rollout lengths, truncation ratio, `Dplus/A/F/B/G/R/T`, entropy/ESS của sampling distribution, số branch probe, throughput, thời gian từng phase và peak GPU memory của từng rank.
+
+## 8. Tạo lại plots
+
+Tạo plots cho run mới nhất:
+
+```bash
+bash scripts/plot.sh
+```
+
+Tạo plots cho run cụ thể:
+
+```bash
+RUN_NAME=rac_opd_qwen3_20260819_143527 bash scripts/plot.sh
+```
+
+Hoặc truyền thẳng output directory:
+
+```bash
+python analyze.py \
+  --output_dir /workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/rac_opd_qwen3_20260819_143527
+```
+
+Plots bao gồm evaluation curves, loss raw/EMA, histogram prompt usage, phân bố vị trí critical state chuẩn hóa/tuyệt đối và phân bố theo selection reason. Dữ liệu gốc luôn được giữ trong CSV/JSON.
+
+## 9. Output layout
+
+```text
+outputs/
+├── latest_run.txt
+└── rac_opd_qwen3_YYYYMMDD_HHMMSS/
+    ├── config_resolved.yaml
+    ├── logs/
+    │   ├── train.jsonl
+    │   ├── train_metrics.csv
+    │   ├── eval_metrics.csv
+    │   └── tensorboard/
+    ├── eval/
+    │   ├── step_000000/
+    │   ├── step_000050/
+    │   └── ...
+    ├── checkpoints/
+    │   ├── step_000050/
+    │   │   ├── student/
+    │   │   └── trainer_state.pt
+    │   └── ...
+    ├── analysis/
+    │   ├── critical_states.csv
+    │   ├── prompt_usage.csv
+    │   ├── prompt_usage_summary.json
+    │   └── loss_curve.csv
+    └── plots/
+        ├── eval_curves.png
+        ├── eval_curves.pdf
+        ├── loss_curve.png
+        ├── loss_curve.pdf
+        ├── prompt_usage_hist.png
+        ├── critical_state_normalized_position.png
+        ├── critical_state_absolute_position.png
+        └── critical_state_by_reason.png
+```
+
+`config_resolved.yaml` chứa run name timestamp và `max_steps` đã resolve, nên đây là file cần lưu cùng kết quả để tái lập thí nghiệm.
+
+## 10. Local dry run
+
+Runtime mặc định luôn giữ path B200. Muốn smoke test local phải override model và dataset rõ ràng:
 
 ```bash
 python train.py --dry_run \
@@ -145,7 +373,64 @@ python train.py --dry_run \
   --set paths.output_root=/tmp/racprompt_outputs
 ```
 
-## Output layout
+Dry run dùng tối đa tám prompt, một optimizer step, tối đa 32 response tokens và tắt full evaluation. Nó không thay đổi default của run thật.
 
-Runs are written to `/workspace/storage-shared/nlp/minhpn19/RACprompt/outputs/<run_name>/` with resolved config, JSONL/CSV/TensorBoard logs, per-step full evaluation generations, resumable checkpoints, prompt usage and critical-state analysis CSVs, and all required PNG/PDF plots.
+## 11. Ghi chú backend và xử lý lỗi
 
+### Thấy cảnh báo fallback từ vLLM training rollout
+
+Đây là hành vi an toàn. Public colocated weight-transfer API phụ thuộc version. `ROLLOUT_BACKEND=auto` chỉ dùng vLLM training rollout khi có adapter đồng bộ current weights đã được xác thực; bản hiện tại fallback sang HF/PyTorch với đúng model trong memory. Nó không reload model từ disk mỗi step và không bao giờ âm thầm sinh rollout từ stale weights.
+
+Evaluation vẫn bắt buộc dùng vLLM.
+
+### Không tìm thấy `latest_run.txt`
+
+Chưa có run nào khởi tạo thành công trong `OUTPUT_ROOT`, hoặc bạn đang trỏ nhầm root. Chỉ định rõ:
+
+```bash
+OUTPUT_ROOT=/correct/output/root \
+RUN_NAME=known_run_name \
+RESUME=latest \
+bash scripts/train.sh
+```
+
+### Dataset field không được nhận diện
+
+Xem schema được in trong console, sau đó override:
+
+```bash
+bash scripts/train.sh \
+  --set data.prompt_field=question \
+  --set data.answer_field=answer \
+  --set data.id_field=problem_id
+```
+
+### CUDA OOM
+
+Không giảm global batch hoặc số critical state trước khi xác định phase gây OOM. Các lựa chọn ít ảnh hưởng semantics hơn:
+
+```bash
+bash scripts/train.sh \
+  --set rollout.batch_size_per_device=2 \
+  --set critical.branch_microbatch_size=2 \
+  --set training.gradient_checkpointing=true
+```
+
+`GLOBAL_BATCH_SIZE`, learning rate, generation sampling và precision không tự thay đổi theo số GPU.
+
+### Resume báo world size không khớp
+
+Checkpoint lưu RNG riêng cho từng rank. Dùng lại đúng số GPU của run gốc; code chủ động từ chối resume “exact” bằng world size khác.
+
+## 12. Các invariant nghiên cứu quan trọng
+
+- Main rollout luôn là `student_current`, không teacher guidance.
+- Critical selector chỉ dùng temporal coverage, `Dplus` peaks và thay đổi compatibility; không dùng TA-OPD `D*C`.
+- Counterfactual branch chỉ dài đúng một token correction rồi đo next-state distribution.
+- Không backpropagate và không train trên branch.
+- `R` là geometric mean có floor, không phải arithmetic mean.
+- `T=G*R` chỉ cập nhật future prompt sampling memory.
+- OPD loss chỉ dùng original student rollout, không `T(q)` weighting và không token mask.
+- Teacher luôn frozen, BF16, eval và no-grad.
+- Global batch và loss semantics độc lập số GPU.
+- Step 0, periodic và final evaluation đều chạy trên toàn bộ ba benchmark.

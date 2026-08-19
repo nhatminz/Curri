@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from racprompt.checkpoint import checkpoint_step, resolve_resume_path
-from racprompt.config import load_config
+from racprompt.config import is_automatic_run_name, load_config, read_latest_run_name
 from racprompt.evaluator import VLLMMathEvaluator, append_eval_metrics
 from racprompt.logging_utils import setup_logging
 from racprompt.plotting import plot_evaluation
@@ -32,6 +32,8 @@ def main() -> None:
     args = parse_args()
     setup_logging(True)
     config = load_config(args.config, args.set)
+    if is_automatic_run_name(config.training.run_name) and not args.output_dir:
+        config.training.run_name = read_latest_run_name(config.paths.output_root)
     output_dir = (
         Path(args.output_dir)
         if args.output_dir

@@ -1,0 +1,90 @@
+paths:
+  student_model: /workspace/storage-shared/models/Qwen3-1.7B
+  teacher_model: /workspace/storage-shared/models/Qwen3-8B
+  train_data: /workspace/storage-shared/nlp/minhpn19/data/DAPO-Math-17k-Processed
+  math500: /workspace/storage-shared/nlp/minhpn19/data/eval/math500
+  aime24: /workspace/storage-shared/nlp/minhpn19/data/eval/aime24
+  aime25: /workspace/storage-shared/nlp/minhpn19/data/eval/aime25
+  output_root: /workspace/storage-shared/nlp/minhpn19/RACprompt/outputs
+
+data:
+  train_split: train
+  eval_split: null
+  prompt_field: null
+  answer_field: null
+  id_field: null
+  prompt_template_mode: auto
+  enable_thinking: null
+  max_prompt_tokens: 1024
+
+curriculum:
+  initial_score: 0.5
+  age_tau_steps: 200
+  enable_staleness_decay: true
+  eps_explore: 0.10
+  temperature: 0.25
+  ema_beta: 0.80
+  seed: 2025
+
+critical:
+  target: 24
+  num_segments: 12
+  global_peaks: 8
+  change_points: 4
+  change_lag: 32
+  min_gap_tokens: 32
+  stats_top_k: 32
+  branch_candidates: 4
+  eps_num: 1.0e-12
+  score_position_chunk: 32
+  branch_microbatch_size: 4
+
+rollout:
+  backend: auto
+  max_new_tokens: 2048
+  temperature: 1.0
+  top_p: 1.0
+  repetition_penalty: 1.0
+  rollouts_per_prompt: 1
+  batch_size_per_device: 0
+  allow_vllm_training_backend: true
+
+training:
+  run_name: rac_opd_qwen3
+  global_batch_size: 32
+  max_steps: 0
+  extra_steps: 100
+  learning_rate: 1.0e-6
+  weight_decay: 0.01
+  scheduler: constant
+  max_grad_norm: 1.0
+  opd_top_k: 16
+  gradient_checkpointing: false
+  seed: 1337
+  diagnostic_sequence_microbatch_size: 1
+  attn_implementation: auto
+  fused_adamw: true
+  tf32: true
+  dry_run: false
+
+evaluation:
+  every_steps: 50
+  temperature: 0.6
+  top_p: 0.95
+  num_samples_per_problem: 4
+  max_new_tokens: 2048
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  gpu_memory_utilization: 0.35
+  max_model_len: null
+  enabled: true
+
+checkpoint:
+  save_every_steps: 50
+  keep_last_n: 3
+  resume: null
+
+logging:
+  tensorboard: true
+  log_every_steps: 1
+  plot_after_eval: true

@@ -1,0 +1,15 @@
+# Install the matching CUDA 12.9 vLLM wheel first as documented in README.md.
+# vLLM 0.23.0's published build configuration is paired with torch 2.11.0.
+vllm==0.23.0
+torch==2.11.0
+transformers>=5.5.1,<6.0.0
+datasets>=4.0.0,<6.0.0
+safetensors>=0.6.2,<1.0.0
+tqdm>=4.66.0,<5.0.0
+numpy>=1.26.0,<3.0.0
+pandas>=2.2.0,<4.0.0
+matplotlib>=3.8.0,<4.0.0
+PyYAML>=6.0.2,<7.0.0
+tensorboard>=2.18.0,<3.0.0
+sympy>=1.13.0
+pytest>=8.0.0,<10.0.0
